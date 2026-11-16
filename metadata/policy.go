@@ -295,10 +295,8 @@ func SetPolicy(path string, data *PolicyData) error {
 		return errors.Wrap(err, "invalid policy")
 	}
 
-	descriptorBytes, err := hex.DecodeString(data.KeyDescriptor)
-	if err != nil {
-		return errors.New("invalid key descriptor: " + data.KeyDescriptor)
-	}
+	// CheckValidity() already verified the descriptor, so decoding cannot fail.
+	descriptorBytes, _ := hex.DecodeString(data.KeyDescriptor)
 
 	switch data.Options.PolicyVersion {
 	case 1:

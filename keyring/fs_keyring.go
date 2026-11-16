@@ -37,6 +37,7 @@ import (
 
 	"github.com/google/fscrypt/crypto"
 	"github.com/google/fscrypt/filesystem"
+	"github.com/google/fscrypt/metadata"
 	"github.com/google/fscrypt/security"
 	"github.com/google/fscrypt/util"
 )
@@ -94,18 +95,16 @@ func IsFsKeyringSupported(mount *filesystem.Mount) bool {
 
 // buildKeySpecifier converts the key descriptor string to an FscryptKeySpecifier.
 func buildKeySpecifier(spec *unix.FscryptKeySpecifier, descriptor string) error {
-	descriptorBytes, err := hex.DecodeString(descriptor)
-	if err != nil {
-		return errors.Errorf("key descriptor %q is invalid", descriptor)
-	}
-	switch len(descriptorBytes) {
-	case unix.FSCRYPT_KEY_DESCRIPTOR_SIZE:
+	if err := metadata.CheckDescriptor(descriptor, unix.FSCRYPT_KEY_DESCRIPTOR_SIZE); err == nil {
 		spec.Type = unix.FSCRYPT_KEY_SPEC_TYPE_DESCRIPTOR
-	case unix.FSCRYPT_KEY_IDENTIFIER_SIZE:
+	} else if err = metadata.CheckDescriptor(descriptor, unix.FSCRYPT_KEY_IDENTIFIER_SIZE); err == nil {
 		spec.Type = unix.FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER
-	default:
-		return errors.Errorf("key descriptor %q has unknown length", descriptor)
+	} else {
+		return errors.Wrapf(err, "key descriptor %q", descriptor)
 	}
+	// The descriptor passed the shared CheckDescriptor check, so decoding
+	// cannot fail.
+	descriptorBytes, _ := hex.DecodeString(descriptor)
 	copy(spec.U[:], descriptorBytes)
 	return nil
 }

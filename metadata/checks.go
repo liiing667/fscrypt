@@ -20,16 +20,45 @@
 package metadata
 
 import (
+	"encoding/hex"
 	"log"
 	"math"
 
 	"github.com/pkg/errors"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/google/fscrypt/util"
 )
 
 var errNotInitialized = errors.New("not initialized")
+
+var (
+	// ErrInvalidDescriptor indicates that a key or protector descriptor is
+	// not a valid lowercase hexadecimal string.
+	ErrInvalidDescriptor = errors.New("invalid descriptor")
+	// ErrNoKeySlots indicates that a policy does not contain any wrapped
+	// policy keys, so it cannot be unlocked by any protector.
+	ErrNoKeySlots = errors.New("no key slots")
+	// ErrDuplicateProtector indicates that a policy contains more than one
+	// key slot for the same protector descriptor.
+	ErrDuplicateProtector = errors.New("duplicate protector descriptor")
+)
+
+// CheckDescriptor ensures that descriptor is a valid hexadecimal string that
+// decodes to exactly expectedLen bytes. This is the single integrity check for
+// key and protector descriptors shared by the metadata validity checks, the
+// policy ioctl path, and the keyring path.
+func CheckDescriptor(descriptor string, expectedLen int) error {
+	if err := util.CheckValidLength(2*expectedLen, len(descriptor)); err != nil {
+		return err
+	}
+	decoded, err := hex.DecodeString(descriptor)
+	if err != nil || len(decoded) != expectedLen {
+		return errors.Wrapf(ErrInvalidDescriptor, "%q", descriptor)
+	}
+	return nil
+}
 
 // Metadata is the interface to all of the protobuf structures that can be
 // checked for validity.
@@ -139,9 +168,8 @@ func (p *ProtectorData) CheckValidity() error {
 	if err := p.WrappedKey.CheckValidity(); err != nil {
 		return errors.Wrap(err, "wrapped protector key")
 	}
-	if err := util.CheckValidLength(ProtectorDescriptorLen, len(p.ProtectorDescriptor)); err != nil {
+	if err := CheckDescriptor(p.ProtectorDescriptor, unix.FSCRYPT_KEY_DESCRIPTOR_SIZE); err != nil {
 		return errors.Wrap(err, "protector descriptor")
-
 	}
 	err := util.CheckValidLength(InternalKeyLen, len(p.WrappedKey.EncryptedKey))
 	return errors.Wrap(err, "encrypted protector key")
@@ -182,8 +210,8 @@ func (w *WrappedPolicyKey) CheckValidity() error {
 	if err := util.CheckValidLength(PolicyKeyLen, len(w.WrappedKey.EncryptedKey)); err != nil {
 		return errors.Wrap(err, "encrypted key")
 	}
-	err := util.CheckValidLength(ProtectorDescriptorLen, len(w.ProtectorDescriptor))
-	return errors.Wrap(err, "wrapping protector descriptor")
+	return errors.Wrap(CheckDescriptor(w.ProtectorDescriptor,
+		unix.FSCRYPT_KEY_DESCRIPTOR_SIZE), "wrapping protector descriptor")
 }
 
 // CheckValidity ensures the fields and each wrapped key are valid.
@@ -191,11 +219,23 @@ func (p *PolicyData) CheckValidity() error {
 	if p == nil {
 		return errNotInitialized
 	}
+	if len(p.WrappedPolicyKeys) == 0 {
+		return errors.Wrap(ErrNoKeySlots, "policy key slots")
+	}
 	// Check each wrapped key
 	for i, w := range p.WrappedPolicyKeys {
 		if err := w.CheckValidity(); err != nil {
 			return errors.Wrapf(err, "policy key slot %d", i)
 		}
+	}
+	// Each protector may only wrap the policy key once.
+	seenProtectors := make(map[string]bool, len(p.WrappedPolicyKeys))
+	for i, w := range p.WrappedPolicyKeys {
+		if seenProtectors[w.ProtectorDescriptor] {
+			return errors.Wrapf(ErrDuplicateProtector, "policy key slot %d: %q",
+				i, w.ProtectorDescriptor)
+		}
+		seenProtectors[w.ProtectorDescriptor] = true
 	}
 
 	if err := p.Options.CheckValidity(); err != nil {
@@ -205,14 +245,14 @@ func (p *PolicyData) CheckValidity() error {
 	var expectedLen int
 	switch p.Options.PolicyVersion {
 	case 1:
-		expectedLen = PolicyDescriptorLenV1
+		expectedLen = unix.FSCRYPT_KEY_DESCRIPTOR_SIZE
 	case 2:
-		expectedLen = PolicyDescriptorLenV2
+		expectedLen = unix.FSCRYPT_KEY_IDENTIFIER_SIZE
 	default:
 		return errors.Errorf("policy version of %d is invalid", p.Options.PolicyVersion)
 	}
 
-	if err := util.CheckValidLength(expectedLen, len(p.KeyDescriptor)); err != nil {
+	if err := CheckDescriptor(p.KeyDescriptor, expectedLen); err != nil {
 		return errors.Wrap(err, "policy key descriptor")
 	}
 
